@@ -1,20 +1,67 @@
-#!/usr/bin/awk -f
+#!/usr/bin/gawk -f
 
 # AWK Script to Parse and Group Nmap ssl-enum-ciphers Output
 #
-# This script processes the output from Nmap's ssl-enum-ciphers script and
-# extracts two categories of findings:
-#   1. Hosts supporting deprecated protocols, grouped and formatted for reporting.
-#   2. Hosts supporting weak ciphers (strength rating less than 'A'), with duplicates removed.
+# Version 5.1
+#
+# This script processes Nmap's ssl-enum-ciphers output and extracts:
+#   1. Hosts supporting deprecated protocols (SSLv2, SSLv3, TLSv1.0, TLSv1.1).
+#   2. Hosts supporting weak ciphers (strength rating less than 'A').
+#
+# The output format for both findings can be switched between a consolidated
+# summary (default) and a detailed, grouped list (via command-line flag).
 #
 # Usage:
-# 1. Save this script as, e.g., parse_tls.awk
-# 2. Make it executable: chmod +x parse_tls.awk
-# 3. Run it against your Nmap output file: ./parse_tls.awk crypt.txt
+#   Default (Consolidated Lists for Protocols & Ciphers):
+#     ./parse_tls.awk nmap_output.txt
+#
+#   Grouped by Protocol & Host (Detailed View):
+#     gawk -v group=1 -f parse_tls.awk nmap_output.txt
+#
+# Note: This script uses features of GNU Awk (gawk), such as 'asorti'.
 
-# This function is called when a new Nmap report starts to reset our variables.
+# This function prints a list of items in a formatted, multi-column layout.
+# The number of columns is determined by the total number of items.
+function print_hosts(hosts,    sorted_hosts, count, cols, i) {
+    count = asorti(hosts, sorted_hosts)
+    if (count == 0) {
+        return
+    }
+
+    # Determine the number of columns based on the host count.
+    if (count > 30) {
+        cols = 3
+    } else if (count > 10) {
+        cols = 2
+    } else {
+        cols = 1
+    }
+
+    # Loop through the sorted hosts and print them in formatted columns.
+    for (i = 1; i <= count; i++) {
+        printf "    %-30s", sorted_hosts[i]
+        if (i % cols == 0) {
+            printf "\n"
+        }
+    }
+
+    # Add a final newline if the last row was not completely filled.
+    if (count % cols != 0) {
+        printf "\n"
+    }
+}
+
+# This function creates a separator line (e.g., "----") of a given length.
+function print_separator(len,    i, line) {
+    line = ""
+    for (i = 0; i < len; i++) {
+        line = line "-"
+    }
+    print line
+}
+
+# This function is called when a new Nmap report starts.
 function reset_state() {
-    # Extract IP address, handling FQDNs like "host.com (1.2.3.4)"
     ip = $NF
     gsub(/[()]/, "", ip)
     port = "N/A"
@@ -32,6 +79,12 @@ function reset_state() {
 }
 
 # Store flags for which weak protocols are seen for a given host:port
+/^\|\s+SSLv2:/ {
+    found_sslv2[ip ":" port] = 1
+}
+/^\|\s+SSLv3:/ {
+    found_sslv3[ip ":" port] = 1
+}
 /^\|\s+TLSv1\.0:/ {
     found_tls10[ip ":" port] = 1
 }
@@ -42,105 +95,126 @@ function reset_state() {
 # Store unique weak ciphers for each host:port
 /ciphers:/, /compressors:/ {
     if (NF >= 3 && $(NF-1) == "-" && $NF != "A" && $NF != "experimental") {
-        # Extract just the cipher name (the second field)
         cipher_name = $2
-        
-        # Use a compound key to track unique ciphers per host:port.
-        # This automatically handles duplicates.
         unique_weak_ciphers[ip ":" port, cipher_name] = 1
     }
 }
 
 # At the very end of the file, process and print all collected results.
 END {
-    # --- Process and Group Protocols ---
-    # Create arrays for each category based on the flags we set.
-    for (host_port in found_tls10) {
-        if (host_port in found_tls11) {
-            both_hosts[host_port] = 1
-        } else {
-            only_tls10_hosts[host_port] = 1
-        }
-    }
-    # Find hosts that only support TLSv1.1
-    for (host_port in found_tls11) {
-        if (!(host_port in found_tls10)) {
-            only_tls11_hosts[host_port] = 1
-        }
-    }
-
-    # --- Print Grouped Protocols ---
+    # --- Print Protocols Section ---
     print "==========================================="
-    print "FINDING: DEPRECATED TLS PROTOCOLS ENABLED"
+    print "FINDING: DEPRECATED SSL/TLS PROTOCOLS ENABLED"
     print "===========================================\n"
-    
-    # Group 1: Both TLSv1.0 and TLSv1.1
-    print "[HIGH] Hosts supporting BOTH TLSv1.0 and TLSv1.1:"
-    print "------------------------------------------------"
-    if (length(both_hosts) > 0) {
-        asorti(both_hosts, sorted_hosts) # Sort the hosts alphabetically
-        for (i=1; i<=length(sorted_hosts); i++) {
-             printf "    %-25s", sorted_hosts[i] # Print in formatted columns
-             if (i % 3 == 0) printf "\n" # Create 3 columns
-        }
-        if (length(sorted_hosts) % 3 != 0) printf "\n"
-    } else {
-        print "    None found."
-    }
-    print ""
 
-    # Group 2: TLSv1.0 Only
-    print "[MEDIUM] Hosts supporting ONLY TLSv1.0:"
-    print "--------------------------------------"
-    if (length(only_tls10_hosts) > 0) {
-        asorti(only_tls10_hosts, sorted_hosts)
-        for (i=1; i<=length(sorted_hosts); i++) {
-             printf "    %-25s", sorted_hosts[i]
-             if (i % 3 == 0) printf "\n"
-        }
-        if (length(sorted_hosts) % 3 != 0) printf "\n"
+    # Check if any deprecated protocols were found at all.
+    if (length(found_sslv2) == 0 && length(found_sslv3) == 0 && length(found_tls10) == 0 && length(found_tls11) == 0) {
+        print "No hosts with deprecated protocols (SSLv2, SSLv3, TLSv1.0, TLSv1.1) found.\n"
     } else {
-        print "    None found."
-    }
-    print ""
+        # The 'group' variable is passed from the command line, e.g., gawk -v group=1
+        if (group) {
+            # --- GROUPED PROTOCOL MODE ---
+            if (length(found_sslv2) > 0) {
+                print "Affected Protocol: SSLv2"
+                print_separator(24)
+                print_hosts(found_sslv2)
+                print ""
+            }
+            if (length(found_sslv3) > 0) {
+                print "Affected Protocol: SSLv3"
+                print_separator(24)
+                print_hosts(found_sslv3)
+                print ""
+            }
+            if (length(found_tls10) > 0) {
+                print "Affected Protocol: TLSv1.0"
+                print_separator(26)
+                print_hosts(found_tls10)
+                print ""
+            }
+            if (length(found_tls11) > 0) {
+                print "Affected Protocol: TLSv1.1"
+                print_separator(26)
+                print_hosts(found_tls11)
+                print ""
+            }
+        } else {
+            # --- CONSOLIDATED PROTOCOL MODE (DEFAULT) ---
+            # 1. Collect all unique hosts into a single list
+            # Guard each loop with a length check to prevent fatal error on empty (scalar) variables.
+            if (length(found_sslv2) > 0) for (host_port in found_sslv2) all_deprecated_hosts[host_port] = 1
+            if (length(found_sslv3) > 0) for (host_port in found_sslv3) all_deprecated_hosts[host_port] = 1
+            if (length(found_tls10) > 0) for (host_port in found_tls10) all_deprecated_hosts[host_port] = 1
+            if (length(found_tls11) > 0) for (host_port in found_tls11) all_deprecated_hosts[host_port] = 1
 
-    # Group 3: TLSv1.1 Only
-    print "[MEDIUM] Hosts supporting ONLY TLSv1.1:"
-    print "--------------------------------------"
-    if (length(only_tls11_hosts) > 0) {
-        asorti(only_tls11_hosts, sorted_hosts)
-        for (i=1; i<=length(sorted_hosts); i++) {
-             printf "    %-25s", sorted_hosts[i]
-             if (i % 3 == 0) printf "\n"
+            # 2. Build the combined protocol string
+            protocol_list = ""
+            if (length(found_sslv2) > 0) {
+                protocol_list = protocol_list (protocol_list ? " & " : "") "SSLv2"
+            }
+            if (length(found_sslv3) > 0) {
+                protocol_list = protocol_list (protocol_list ? " & " : "") "SSLv3"
+            }
+            if (length(found_tls10) > 0) {
+                protocol_list = protocol_list (protocol_list ? " & " : "") "TLSv1.0"
+            }
+            if (length(found_tls11) > 0) {
+                protocol_list = protocol_list (protocol_list ? " & " : "") "TLSv1.1"
+            }
+            header = "Affected Protocols: " protocol_list
+            print header
+            print_separator(length(header))
+
+            # 3. Print all affected hosts together
+            print_hosts(all_deprecated_hosts)
+            print ""
         }
-        if (length(sorted_hosts) % 3 != 0) printf "\n"
-    } else {
-        print "    None found."
     }
-    print "\n"
 
-    # --- Process and Group Ciphers ---
-    # Invert the unique_weak_ciphers array for easy, grouped printing.
+    # --- Process Ciphers Data ---
+    # This loop populates data structures for both grouped and consolidated modes.
     for (key in unique_weak_ciphers) {
         split(key, parts, SUBSEP)
         host_port = parts[1]
         cipher = parts[2]
-        
+
+        # For grouped mode: associate ciphers with their specific host
         grouped_ciphers[host_port] = grouped_ciphers[host_port] "    (" cipher ")\n"
+
+        # For consolidated mode: collect all unique ciphers and affected hosts
+        all_weak_ciphers[cipher] = 1
+        all_cipher_hosts[host_port] = 1
     }
 
-    # --- Print Grouped Ciphers ---
+    # --- Print Ciphers Section ---
     print "======================================="
-    print "FINDING: DEPRECATED TLS CIPHERS ENABLED"
+    print "FINDING: WEAK TLS CIPHERS ENABLED"
     print "=======================================\n"
-    
-    if (length(grouped_ciphers) > 0) {
-        # Sort the host:port combinations for consistent output
-        asorti(grouped_ciphers, sorted_hosts)
-        for (i=1; i<=length(sorted_hosts); i++) {
-            host_port = sorted_hosts[i]
-            # Updated printf statement for cleaner output
-            printf "%s:\n%s\n", host_port, grouped_ciphers[host_port]
+
+    if (length(all_weak_ciphers) > 0) {
+        if (group) {
+            # --- GROUPED CIPHER MODE ---
+            asorti(grouped_ciphers, sorted_hosts)
+            for (i=1; i<=length(sorted_hosts); i++) {
+                host_port = sorted_hosts[i]
+                printf "%s:\n%s\n", host_port, grouped_ciphers[host_port]
+            }
+        } else {
+            # --- CONSOLIDATED CIPHER MODE (DEFAULT) ---
+            # 1. Print all unique weak ciphers
+            print "Affected Ciphers:"
+            print_separator(17)
+            asorti(all_weak_ciphers, sorted_ciphers)
+            for (i=1; i<=length(sorted_ciphers); i++) {
+                print "    " sorted_ciphers[i]
+            }
+            print ""
+
+            # 2. Print all affected hosts
+            print "Affected Hosts:"
+            print_separator(15)
+            print_hosts(all_cipher_hosts)
+            print ""
         }
     } else {
         print "No hosts with weak ciphers (strength less than A) found."
